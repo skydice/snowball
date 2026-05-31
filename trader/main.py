@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import sys
+import traceback
 from datetime import date, datetime, time
 
 import config
@@ -32,16 +33,26 @@ MARKET_CLOSE = time(15, 30)
 
 
 def _is_market_hours() -> bool:
-    now = datetime.now().time()
-    return MARKET_OPEN <= now <= MARKET_CLOSE
+    return MARKET_OPEN <= datetime.now().time() <= MARKET_CLOSE
+
+
+def _pct(a: float, b: float) -> str:
+    return f"{(a / b - 1) * 100:+.1f}%"
 
 
 def run_strategy(cfg: dict, api: KISApi) -> None:
     name = cfg["NAME"]
-    log.info("===== [%s] 전략 실행: %s =====", name, date.today())
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    log.info("===== [%s] 전략 실행: %s =====", name, now_str)
+
+    notifier.send(
+        f"[{name}] 전략 실행 시작\n"
+        f"시각: {now_str}"
+    )
 
     if not _is_market_hours():
         log.info("[%s] 장 외 시간 — 스킵", name)
+        notifier.send(f"[{name}] 장 외 시간 — 스킵")
         return
 
     state = load_state(cfg["STATE_FILE"])
@@ -54,8 +65,8 @@ def run_strategy(cfg: dict, api: KISApi) -> None:
     log.info("[%s] 현재가: %s원  고가: %s원  저가: %s원",
              name, f"{close:,.0f}", f"{high:,.0f}", f"{low:,.0f}")
 
-    ohlcv = api.get_daily_ohlcv(cfg["BASE_TICKER"], n=config.MA_PERIOD + 5)
-    ma60  = calc_ma60(ohlcv, config.MA_PERIOD)
+    ohlcv      = api.get_daily_ohlcv(cfg["BASE_TICKER"], n=config.MA_PERIOD + 5)
+    ma60       = calc_ma60(ohlcv, config.MA_PERIOD)
     base_close = float(ohlcv[0]["stck_clpr"]) if ohlcv else 0.0
     log.info("[%s] 기준ETF: %s원  MA%d: %s",
              name, f"{base_close:,.0f}", config.MA_PERIOD,
@@ -71,7 +82,11 @@ def run_strategy(cfg: dict, api: KISApi) -> None:
         actual_qty = holdings.get(cfg["TICKER"], {}).get("qty", 0)
         if actual_qty == 0 and state["hold_qty"] > 0:
             log.warning("[%s] 잔고 불일치 감지 (보유: 0주) — 상태 초기화", name)
-            notifier.send(f"[{name}] ⚠️ 잔고 불일치 감지 — 상태 자동 초기화")
+            notifier.send(
+                f"[{name}] ⚠️ 잔고 불일치 감지\n"
+                f"상태파일: {state['hold_qty']}주 / 실제 잔고: 0주\n"
+                f"→ 상태 자동 초기화"
+            )
             state = DEFAULT_STATE.copy()
             save_state(state, cfg["STATE_FILE"])
             return
@@ -84,6 +99,11 @@ def run_strategy(cfg: dict, api: KISApi) -> None:
     if not state["in_trade"]:
         if ma60 is None:
             log.warning("[%s] MA60 데이터 부족 — 진입 보류", name)
+            notifier.send(
+                f"[{name}] ⚠️ MA60 데이터 부족\n"
+                f"데이터: {len(ohlcv)}일치 (필요: {config.MA_PERIOD}일)\n"
+                f"→ 진입 보류"
+            )
             return
 
         cooldown_active = is_cooldown_active(state)
@@ -94,6 +114,12 @@ def run_strategy(cfg: dict, api: KISApi) -> None:
             qty = invest_amt // int(close)
             if qty <= 0:
                 log.warning("[%s] 매수 수량 0 — 스킵 (예수금 부족)", name)
+                notifier.send(
+                    f"[{name}] ⚠️ 예수금 부족 — 매수 스킵\n"
+                    f"예수금: {cash:,}원\n"
+                    f"투입예정: {invest_amt:,}원 (47.5%)\n"
+                    f"현재가: {close:,.0f}원 → 0주"
+                )
                 return
 
             api.buy_market(cfg["TICKER"], qty)
@@ -107,84 +133,150 @@ def run_strategy(cfg: dict, api: KISApi) -> None:
             state["entry_date"]  = date.today().isoformat()
             state["cooldown_end"] = ""
 
-            msg = (f"[매수] {cfg['TICKER']} / {qty}주 / "
-                   f"진입가 {close:,.0f}원")
-            log.info("[%s] %s", name, msg)
-            notifier.send(f"[{name}] {msg}")
-        else:
-            reason = (
-                "쿨다운 중" if cooldown_active
-                else f"MA{config.MA_PERIOD}({ma60:,.0f}) > 현재가({base_close:,.0f})"
+            sl_price = close * (1 + cfg["STOP_LOSS"])
+            tp_price = close * (1 + cfg["TAKE_PROFIT_HALF"])
+            notifier.send(
+                f"[{name}] 매수 체결\n"
+                f"종목: {cfg['TICKER']}\n"
+                f"수량: {qty}주\n"
+                f"진입가: {close:,.0f}원\n"
+                f"투입금: {int(close * qty):,}원\n"
+                f"────────────\n"
+                f"손절선: {sl_price:,.0f}원 ({cfg['STOP_LOSS']*100:.0f}%)\n"
+                f"절반익절: {tp_price:,.0f}원 (+{cfg['TAKE_PROFIT_HALF']*100:.0f}%)"
             )
-            msg = f"[대기] {reason}"
-            log.info("[%s] %s", name, msg)
-            notifier.send(f"[{name}] {msg}")
+
+        else:
+            if cooldown_active:
+                notifier.send(
+                    f"[{name}] 대기 — 쿨다운 중\n"
+                    f"쿨다운 종료: {state['cooldown_end']}\n"
+                    f"기준ETF: {base_close:,.0f}원 / MA{config.MA_PERIOD}: {ma60:,.0f}원"
+                )
+            else:
+                gap_pct = (base_close / ma60 - 1) * 100
+                notifier.send(
+                    f"[{name}] 대기 — 진입 조건 미충족\n"
+                    f"기준ETF: {base_close:,.0f}원\n"
+                    f"MA{config.MA_PERIOD}: {ma60:,.0f}원\n"
+                    f"차이: {gap_pct:+.1f}% (0% 이상이면 진입)"
+                )
 
     # ── 포지션 있음: 청산 판단 ─────────────────────────────────────────
     else:
-        # 고점 갱신
         if high > state["peak_price"]:
             state["peak_price"] = high
 
-        entry = state["entry_price"]
-        pct = (close / entry - 1) * 100
+        entry     = state["entry_price"]
+        peak      = state["peak_price"]
+        hold_qty  = state["hold_qty"]
+        half_sold = state["half_sold"]
+
+        sl_price    = entry * (1 + cfg["STOP_LOSS"])
+        tp_price    = entry * (1 + cfg["TAKE_PROFIT_HALF"])
+        trail_price = peak  * (1 + cfg["TRAIL_STOP"])
+        cur_pct     = (close / entry - 1) * 100
+
         log.info("[%s] 진입가: %s원  손절선: %s원  절반익절: %s원  트레일: %s원",
-                 name,
-                 f"{entry:,.0f}",
-                 f"{entry * (1 + cfg['STOP_LOSS']):,.0f}",
-                 f"{entry * (1 + cfg['TAKE_PROFIT_HALF']):,.0f}",
-                 f"{state['peak_price'] * (1 + cfg['TRAIL_STOP']):,.0f}")
+                 name, f"{entry:,.0f}", f"{sl_price:,.0f}",
+                 f"{tp_price:,.0f}", f"{trail_price:,.0f}")
 
         exit_reason, exit_price = check_exit(cfg, close, high, low, state)
 
         if exit_reason == "STOP_LOSS":
-            qty = state["hold_qty"]
+            qty = hold_qty
             api.sell_market(cfg["TICKER"], qty)
-            pct = (exit_price / entry - 1) * 100
+            loss_amt = int((exit_price - entry) * qty)
             state = DEFAULT_STATE.copy()
             state["cooldown_end"] = get_cooldown_end_date(cfg["COOLDOWN_DAYS"])
-            msg = (f"[매도-손절] {cfg['TICKER']} / {qty}주 / "
-                   f"{exit_price:,.0f}원 / {pct:+.1f}%")
-            log.info("[%s] %s  쿨다운: %s", name, msg, state["cooldown_end"])
-            notifier.send(f"[{name}] {msg}\n쿨다운: {state['cooldown_end']}까지")
+            notifier.send(
+                f"[{name}] 손절 청산\n"
+                f"종목: {cfg['TICKER']}\n"
+                f"수량: {qty}주\n"
+                f"청산가: {exit_price:,.0f}원\n"
+                f"손익: {cfg['STOP_LOSS']*100:.0f}% ({loss_amt:,}원)\n"
+                f"────────────\n"
+                f"진입가: {entry:,.0f}원\n"
+                f"쿨다운: {state['cooldown_end']}까지"
+            )
 
         elif exit_reason == "HALF_TP":
-            qty = state["hold_qty"] // 2
+            qty = hold_qty // 2
             if qty > 0:
                 api.sell_market(cfg["TICKER"], qty)
+                profit_amt = int((exit_price - entry) * qty)
                 state["hold_qty"] -= qty
                 state["half_sold"] = True
-                pct = (exit_price / entry - 1) * 100
-                msg = (f"[매도-절반익절] {cfg['TICKER']} / {qty}주 / "
-                       f"{exit_price:,.0f}원 / {pct:+.1f}%")
-                log.info("[%s] %s  잔여: %d주", name, msg, state["hold_qty"])
-                notifier.send(f"[{name}] {msg}\n잔여 {state['hold_qty']}주 보유 중")
+                notifier.send(
+                    f"[{name}] 절반 익절\n"
+                    f"종목: {cfg['TICKER']}\n"
+                    f"매도: {qty}주\n"
+                    f"청산가: {exit_price:,.0f}원\n"
+                    f"수익: +{cfg['TAKE_PROFIT_HALF']*100:.0f}% (+{profit_amt:,}원)\n"
+                    f"────────────\n"
+                    f"잔여: {state['hold_qty']}주 보유 중\n"
+                    f"본전스탑: {entry:,.0f}원\n"
+                    f"트레일링: {trail_price:,.0f}원 (고점 {peak:,.0f}원 기준)"
+                )
 
         elif exit_reason == "BREAK_EVEN_STOP":
-            qty = state["hold_qty"]
+            qty = hold_qty
             api.sell_market(cfg["TICKER"], qty)
-            pct = (exit_price / entry - 1) * 100
+            profit_amt = int((exit_price - entry) * qty)
             state = DEFAULT_STATE.copy()
-            msg = (f"[매도-본전스탑] {cfg['TICKER']} / {qty}주 / "
-                   f"{exit_price:,.0f}원 / {pct:+.1f}%")
-            log.info("[%s] %s", name, msg)
-            notifier.send(f"[{name}] {msg}")
+            notifier.send(
+                f"[{name}] 본전 스탑 청산\n"
+                f"종목: {cfg['TICKER']}\n"
+                f"수량: {qty}주\n"
+                f"청산가: {exit_price:,.0f}원\n"
+                f"손익: {profit_amt:+,}원\n"
+                f"────────────\n"
+                f"진입가: {entry:,.0f}원 (절반 익절 후 본전 이탈)"
+            )
 
         elif exit_reason == "TRAIL_STOP":
-            qty = state["hold_qty"]
+            qty = hold_qty
             api.sell_market(cfg["TICKER"], qty)
-            pct = (exit_price / entry - 1) * 100
+            profit_amt = int((exit_price - entry) * qty)
+            profit_pct = (exit_price / entry - 1) * 100
             state = DEFAULT_STATE.copy()
-            msg = (f"[매도-트레일링] {cfg['TICKER']} / {qty}주 / "
-                   f"{exit_price:,.0f}원 / {pct:+.1f}%")
-            log.info("[%s] %s", name, msg)
-            notifier.send(f"[{name}] {msg}")
+            notifier.send(
+                f"[{name}] 트레일링 스탑 청산\n"
+                f"종목: {cfg['TICKER']}\n"
+                f"수량: {qty}주\n"
+                f"청산가: {exit_price:,.0f}원\n"
+                f"손익: {profit_pct:+.1f}% (+{profit_amt:,}원)\n"
+                f"────────────\n"
+                f"진입가: {entry:,.0f}원\n"
+                f"고점: {peak:,.0f}원 ({_pct(peak, entry)} 대비 진입가)"
+            )
 
         else:
-            msg = (f"[홀딩] {cfg['TICKER']} / "
-                   f"현재가 {close:,.0f}원 / 진입가 {entry:,.0f}원 / {pct:+.1f}%")
-            log.info("[%s] %s", name, msg)
-            notifier.send(f"[{name}] {msg}")
+            # 홀딩 유지 — 현재 상태 상세 리포트
+            to_sl    = (close / sl_price - 1) * 100
+            if half_sold:
+                next_line = (
+                    f"본전스탑: {entry:,.0f}원 (현재가 {_pct(close, entry)})\n"
+                    f"트레일링: {trail_price:,.0f}원 ({_pct(trail_price, close)} 남음)"
+                )
+            else:
+                to_tp = (tp_price / close - 1) * 100
+                next_line = (
+                    f"절반익절: {tp_price:,.0f}원 (+{to_tp:.1f}% 남음)\n"
+                    f"트레일링: 절반 익절 후 활성화"
+                )
+            notifier.send(
+                f"[{name}] 홀딩 유지\n"
+                f"종목: {cfg['TICKER']}\n"
+                f"현재가: {close:,.0f}원 ({cur_pct:+.1f}%)\n"
+                f"고가: {high:,.0f}원 / 저가: {low:,.0f}원\n"
+                f"────────────\n"
+                f"진입가: {entry:,.0f}원 ({state['entry_date']})\n"
+                f"보유: {hold_qty}주  절반익절: {'완료' if half_sold else '미완료'}\n"
+                f"────────────\n"
+                f"손절선: {sl_price:,.0f}원 ({to_sl:+.1f}% 남음)\n"
+                f"{next_line}"
+            )
 
     save_state(state, cfg["STATE_FILE"])
     log.info("[%s] 상태 저장 완료", name)
@@ -195,8 +287,14 @@ def run_all(api: KISApi) -> None:
         try:
             run_strategy(cfg, api)
         except Exception as e:
-            log.error("[%s] 오류 발생: %s", cfg["NAME"], e, exc_info=True)
-            notifier.send(f"[에러] {cfg['NAME']}: {e}")
+            tb = traceback.format_exc()
+            log.error("[%s] 오류 발생:\n%s", cfg["NAME"], tb)
+            notifier.send(
+                f"[에러] {cfg['NAME']}\n"
+                f"{e}\n"
+                f"────────────\n"
+                f"{tb[-300:]}"  # 마지막 300자만
+            )
 
 
 def print_status() -> None:
@@ -249,15 +347,21 @@ def main() -> None:
             try:
                 run_strategy(cfg, api)
             except Exception as e:
-                log.error("[%s] 오류 발생: %s", cfg["NAME"], e, exc_info=True)
-                notifier.send(f"[에러] {cfg['NAME']}: {e}")
+                tb = traceback.format_exc()
+                log.error("[%s] 오류 발생:\n%s", cfg["NAME"], tb)
+                notifier.send(
+                    f"[에러] {cfg['NAME']}\n"
+                    f"{e}\n"
+                    f"────────────\n"
+                    f"{tb[-300:]}"
+                )
         return
 
     # 인자 없음 → 스케줄러 모드
     import schedule
 
     def job():
-        if datetime.now().weekday() < 5:  # 평일만
+        if datetime.now().weekday() < 5:
             run_all(api)
 
     schedule.every().day.at("09:05").do(job)
