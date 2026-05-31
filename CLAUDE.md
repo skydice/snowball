@@ -194,13 +194,25 @@ TELEGRAM_CHAT_ID   # 텔레그램 수신 chat_id
 ## 실행 방법
 
 ```bash
-python main.py --run-once          # 두 전략 모두 1회 즉시 실행
-python main.py --run-once it       # IT 전략만 실행
-python main.py --run-once ship     # 조선 전략만 실행
-python main.py --status            # 두 전략 상태 출력
-python main.py --reset it          # IT 전략 상태 초기화
-python main.py --reset ship        # 조선 전략 상태 초기화
-python main.py                     # 스케줄러 (09:05 / 13:00 / 14:50, 두 전략 순차 실행)
+# 의존성 설치 (최초 1회)
+uv sync
+
+# 실행
+uv run main.py run-once            # 두 전략 모두 1회 즉시 실행
+uv run main.py run-once it         # IT 전략만 실행
+uv run main.py run-once ship       # 조선 전략만 실행
+uv run main.py --env demo run-once # 모의 계좌로 테스트
+uv run main.py status              # 두 전략 상태 출력
+uv run main.py reset it            # IT 전략 상태 초기화
+uv run main.py reset ship          # 조선 전략 상태 초기화
+uv run main.py                     # 스케줄러 (09:05 / 13:00 / 14:50, 두 전략 순차 실행)
+```
+
+cron 등록 시:
+```
+5  9  * * 1-5  cd ~/trader && uv run main.py run-once >> trader.log 2>&1
+0  13 * * 1-5  cd ~/trader && uv run main.py run-once >> trader.log 2>&1
+50 14 * * 1-5  cd ~/trader && uv run main.py run-once >> trader.log 2>&1
 ```
 
 ## 테스트 시나리오
