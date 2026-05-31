@@ -5,6 +5,8 @@
 
 # 런타임 파일
 trader_state.json
+state_it.json
+state_ship.json
 *.log
 
 # Python
