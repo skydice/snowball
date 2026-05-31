@@ -1,0 +1,19 @@
+# 환경변수 / 시크릿
+.env
+.env.*
+!.env.example
+
+# 런타임 파일
+trader_state.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
