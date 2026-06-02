@@ -201,7 +201,8 @@ class KISApi:
                 "CNDT_PRIC":        "",
             },
         )
-        log.info("매수 주문 완료: %s %d주 (주문번호: %s)", ticker, qty, data.get("output", {}).get("odno"))
+        out = data.get("output", {})
+        log.info("매수 주문 완료: %s %d주 (주문번호: %s)", ticker, qty, out.get("ODNO") or out.get("odno"))
         return data
 
     def sell_market(self, ticker: str, qty: int) -> dict:
@@ -221,5 +222,6 @@ class KISApi:
                 "CNDT_PRIC":        "",
             },
         )
-        log.info("매도 주문 완료: %s %d주 (주문번호: %s)", ticker, qty, data.get("output", {}).get("odno"))
+        out = data.get("output", {})
+        log.info("매도 주문 완료: %s %d주 (주문번호: %s)", ticker, qty, out.get("ODNO") or out.get("odno"))
         return data
