@@ -61,25 +61,29 @@ class KISApi:
             "custtype":      "P",
         }
 
-    def _get(self, path: str, tr_id: str, params: dict) -> dict:
+    def _request(self, method: str, path: str, tr_id: str, **kwargs) -> dict:
         self._ensure_token()
         url = self._base_url + path
-        res = requests.get(url, headers=self._headers(tr_id), params=params, timeout=10)
-        res.raise_for_status()
+        for attempt in range(1, 4):
+            res = requests.request(method, url, headers=self._headers(tr_id), timeout=10, **kwargs)
+            if res.status_code == 500:
+                log.warning("[%s] KIS 500 오류, %d초 후 재시도 (%d/3): %s", tr_id, attempt * 2, attempt, res.text[:200])
+                time.sleep(attempt * 2)
+                continue
+            if not res.ok:
+                log.error("[%s] HTTP %d: %s", tr_id, res.status_code, res.text[:300])
+            res.raise_for_status()
+            break
         data = res.json()
         if data.get("rt_cd") != "0":
             raise RuntimeError(f"KIS API 오류 [{tr_id}] rt_cd={data.get('rt_cd')} msg={data.get('msg1')}")
         return data
 
+    def _get(self, path: str, tr_id: str, params: dict) -> dict:
+        return self._request("GET", path, tr_id, params=params)
+
     def _post(self, path: str, tr_id: str, body: dict) -> dict:
-        self._ensure_token()
-        url = self._base_url + path
-        res = requests.post(url, headers=self._headers(tr_id), json=body, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        if data.get("rt_cd") != "0":
-            raise RuntimeError(f"KIS API 오류 [{tr_id}] rt_cd={data.get('rt_cd')} msg={data.get('msg1')}")
-        return data
+        return self._request("POST", path, tr_id, json=body)
 
     # --------------------------------------------------------------- 시세
 
