@@ -41,11 +41,18 @@ class KISApi:
             "appkey":      self._app_key,
             "appsecret":   self._app_secret,
         }
-        res = requests.post(url, json=body, timeout=10)
-        res.raise_for_status()
+        for attempt in range(2):
+            res = requests.post(url, json=body, timeout=10)
+            if res.status_code == 403:
+                err = res.json().get("error_code", "")
+                if err == "EGW00133" and attempt == 0:
+                    log.warning("토큰 발급 분당 1회 제한 (EGW00133), 62초 대기 후 재시도")
+                    time.sleep(62)
+                    continue
+            res.raise_for_status()
+            break
         data = res.json()
         self._token = data["access_token"]
-        # 토큰 유효 시간(초) — API는 86400초(24h) 반환, 실제 유효 23h로 운영
         expires_in = int(data.get("expires_in", 86400))
         self._token_expires_at = datetime.now() + timedelta(seconds=expires_in)
         log.info("KIS 토큰 갱신 완료 (만료: %s)", self._token_expires_at.strftime("%Y-%m-%d %H:%M"))
@@ -65,10 +72,12 @@ class KISApi:
         self._ensure_token()
         url = self._base_url + path
         for attempt in range(1, 4):
+            time.sleep(0.25)  # EGW00201 초당 거래건수 초과 방지
             res = requests.request(method, url, headers=self._headers(tr_id), timeout=10, **kwargs)
-            if res.status_code == 500:
-                log.warning("[%s] KIS 500 오류, %d초 후 재시도 (%d/3): %s", tr_id, attempt * 2, attempt, res.text[:200])
-                time.sleep(attempt * 2)
+            if res.status_code >= 500:
+                body = res.text[:200]
+                log.warning("[%s] KIS %d 오류, %d초 후 재시도 (%d/3): %s", tr_id, res.status_code, attempt * 3, attempt, body)
+                time.sleep(attempt * 3)
                 continue
             if not res.ok:
                 log.error("[%s] HTTP %d: %s", tr_id, res.status_code, res.text[:300])
