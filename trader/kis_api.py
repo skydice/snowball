@@ -25,7 +25,7 @@ class KISApi:
         self._account_suffix = config.ACCOUNT_SUFFIX
         self._base_url = config.BASE_URL
         self._token: str = ""
-        self._token_expires_at: datetime = datetime.min
+        self._token_expires_at: datetime = datetime(2000, 1, 1)
 
     # ------------------------------------------------------------------ auth
 
