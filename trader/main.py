@@ -40,7 +40,7 @@ def _pct(a: float, b: float) -> str:
     return f"{(a / b - 1) * 100:+.1f}%"
 
 
-def run_strategy(cfg: dict, api: KISApi) -> None:
+def run_strategy(cfg: dict, api: KISApi, invest_cash: int | None = None) -> None:
     name = cfg["NAME"]
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     log.info("===== [%s] 전략 실행: %s =====", name, now_str)
@@ -110,14 +110,14 @@ def run_strategy(cfg: dict, api: KISApi) -> None:
         log.info("[%s] 쿨다운: %s", name, state.get("cooldown_end") or "없음")
 
         if should_enter(base_close, ma60, state, cooldown_active):
-            invest_amt = int(cash * config.INVEST_RATIO)
+            invest_amt = invest_cash if invest_cash is not None else int(cash * config.INVEST_RATIO)
             qty = invest_amt // int(close)
             if qty <= 0:
                 log.warning("[%s] 매수 수량 0 — 스킵 (예수금 부족)", name)
                 notifier.send(
                     f"[{name}] ⚠️ 예수금 부족 — 매수 스킵\n"
                     f"예수금: {cash:,}원\n"
-                    f"투입예정: {invest_amt:,}원 (47.5%)\n"
+                    f"투입예정: {invest_amt:,}원 (25%)\n"
                     f"현재가: {close:,.0f}원 → 0주"
                 )
                 return
@@ -283,9 +283,19 @@ def run_strategy(cfg: dict, api: KISApi) -> None:
 
 
 def run_all(api: KISApi) -> None:
+    # 전략 실행 전 전체 예수금 스냅샷 — 각 전략에 25%씩 배분 (50% 현금 보유)
+    try:
+        total_cash = api.get_balance()["cash"]
+        n_strategies = len(config.STRATEGIES)
+        per_strategy = int(total_cash * 0.50 / n_strategies)
+        log.info("총 예수금: %s원 → 전략당 투입 %s원 (각 25%%)", f"{total_cash:,}", f"{per_strategy:,}")
+    except Exception as e:
+        log.warning("잔고 선조회 실패, 개별 조회로 fallback: %s", e)
+        per_strategy = None
+
     for cfg in config.STRATEGIES.values():
         try:
-            run_strategy(cfg, api)
+            run_strategy(cfg, api, invest_cash=per_strategy)
         except Exception as e:
             tb = traceback.format_exc()
             log.error("[%s] 오류 발생:\n%s", cfg["NAME"], tb)
