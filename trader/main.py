@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import sys
+import time as _time
 import traceback
 from datetime import date, datetime, time
 
@@ -38,6 +39,45 @@ def _is_market_hours() -> bool:
 
 def _pct(a: float, b: float) -> str:
     return f"{(a / b - 1) * 100:+.1f}%"
+
+
+def _sell_verified(api: KISApi, cfg: dict, qty: int, label: str,
+                   ref_price: float | None = None, max_retries: int = 3) -> bool:
+    """매도 주문 후 체결 확인. 미체결 + 현재가 < ref_price 이면 재시도."""
+    remaining = qty
+    for attempt in range(1, max_retries + 1):
+        api.sell_market(cfg["TICKER"], remaining)
+        _time.sleep(2)
+        balance = api.get_balance()
+        actual_qty = balance["holdings"].get(cfg["TICKER"], {}).get("qty", 0)
+        if actual_qty == 0:
+            return True
+
+        remaining = actual_qty  # 부분 체결 대응: 실제 남은 수량으로 재시도
+
+        if ref_price is not None and attempt < max_retries:
+            cur = api.get_price(cfg["TICKER"])["close"]
+            if cur < ref_price:
+                warn = (
+                    f"[{cfg['NAME']}] 매도 미체결 재시도 ({attempt}/{max_retries})\n"
+                    f"사유: {label} / 잔고: {actual_qty}주\n"
+                    f"현재가 {cur:,.0f} < 기준가 {ref_price:,.0f}"
+                )
+                log.warning(warn)
+                notifier.send(warn)
+                _time.sleep(5)
+                continue
+
+        msg = (
+            f"[긴급] {cfg['NAME']} 매도 미체결\n"
+            f"사유: {label}\n"
+            f"주문: {qty}주 / 잔고: {actual_qty}주 남음\n"
+            f"→ 수동 확인 필요"
+        )
+        log.error(msg)
+        notifier.send(msg)
+        return False
+    return False
 
 
 def run_strategy(cfg: dict, api: KISApi, invest_cash: int | None = None) -> None:
@@ -185,25 +225,24 @@ def run_strategy(cfg: dict, api: KISApi, invest_cash: int | None = None) -> None
 
         if exit_reason == "STOP_LOSS":
             qty = hold_qty
-            api.sell_market(cfg["TICKER"], qty)
-            loss_amt = int((exit_price - entry) * qty)
-            state = DEFAULT_STATE.copy()
-            state["cooldown_end"] = get_cooldown_end_date(cfg["COOLDOWN_DAYS"])
-            notifier.send(
-                f"[{name}] 손절 청산\n"
-                f"종목: {cfg['TICKER']}\n"
-                f"수량: {qty}주\n"
-                f"청산가: {exit_price:,.0f}원\n"
-                f"손익: {cfg['STOP_LOSS']*100:.0f}% ({loss_amt:,}원)\n"
-                f"────────────\n"
-                f"진입가: {entry:,.0f}원\n"
-                f"쿨다운: {state['cooldown_end']}까지"
-            )
+            if _sell_verified(api, cfg, qty, "손절", ref_price=sl_price):
+                loss_amt = int((exit_price - entry) * qty)
+                state = DEFAULT_STATE.copy()
+                state["cooldown_end"] = get_cooldown_end_date(cfg["COOLDOWN_DAYS"])
+                notifier.send(
+                    f"[{name}] 손절 청산\n"
+                    f"종목: {cfg['TICKER']}\n"
+                    f"수량: {qty}주\n"
+                    f"청산가: {exit_price:,.0f}원\n"
+                    f"손익: {cfg['STOP_LOSS']*100:.0f}% ({loss_amt:,}원)\n"
+                    f"────────────\n"
+                    f"진입가: {entry:,.0f}원\n"
+                    f"쿨다운: {state['cooldown_end']}까지"
+                )
 
         elif exit_reason == "HALF_TP":
             qty = hold_qty // 2
-            if qty > 0:
-                api.sell_market(cfg["TICKER"], qty)
+            if qty > 0 and _sell_verified(api, cfg, qty, "절반익절", ref_price=tp_price):
                 profit_amt = int((exit_price - entry) * qty)
                 state["hold_qty"] -= qty
                 state["half_sold"] = True
@@ -221,35 +260,35 @@ def run_strategy(cfg: dict, api: KISApi, invest_cash: int | None = None) -> None
 
         elif exit_reason == "BREAK_EVEN_STOP":
             qty = hold_qty
-            api.sell_market(cfg["TICKER"], qty)
-            profit_amt = int((exit_price - entry) * qty)
-            state = DEFAULT_STATE.copy()
-            notifier.send(
-                f"[{name}] 본전 스탑 청산\n"
-                f"종목: {cfg['TICKER']}\n"
-                f"수량: {qty}주\n"
-                f"청산가: {exit_price:,.0f}원\n"
-                f"손익: {profit_amt:+,}원\n"
-                f"────────────\n"
-                f"진입가: {entry:,.0f}원 (절반 익절 후 본전 이탈)"
-            )
+            if _sell_verified(api, cfg, qty, "본전스탑", ref_price=entry):
+                profit_amt = int((exit_price - entry) * qty)
+                state = DEFAULT_STATE.copy()
+                notifier.send(
+                    f"[{name}] 본전 스탑 청산\n"
+                    f"종목: {cfg['TICKER']}\n"
+                    f"수량: {qty}주\n"
+                    f"청산가: {exit_price:,.0f}원\n"
+                    f"손익: {profit_amt:+,}원\n"
+                    f"────────────\n"
+                    f"진입가: {entry:,.0f}원 (절반 익절 후 본전 이탈)"
+                )
 
         elif exit_reason == "TRAIL_STOP":
             qty = hold_qty
-            api.sell_market(cfg["TICKER"], qty)
-            profit_amt = int((exit_price - entry) * qty)
-            profit_pct = (exit_price / entry - 1) * 100
-            state = DEFAULT_STATE.copy()
-            notifier.send(
-                f"[{name}] 트레일링 스탑 청산\n"
-                f"종목: {cfg['TICKER']}\n"
-                f"수량: {qty}주\n"
-                f"청산가: {exit_price:,.0f}원\n"
-                f"손익: {profit_pct:+.1f}% (+{profit_amt:,}원)\n"
-                f"────────────\n"
-                f"진입가: {entry:,.0f}원\n"
-                f"고점: {peak:,.0f}원 ({_pct(peak, entry)} 대비 진입가)"
-            )
+            if _sell_verified(api, cfg, qty, "트레일링", ref_price=trail_price):
+                profit_amt = int((exit_price - entry) * qty)
+                profit_pct = (exit_price / entry - 1) * 100
+                state = DEFAULT_STATE.copy()
+                notifier.send(
+                    f"[{name}] 트레일링 스탑 청산\n"
+                    f"종목: {cfg['TICKER']}\n"
+                    f"수량: {qty}주\n"
+                    f"청산가: {exit_price:,.0f}원\n"
+                    f"손익: {profit_pct:+.1f}% (+{profit_amt:,}원)\n"
+                    f"────────────\n"
+                    f"진입가: {entry:,.0f}원\n"
+                    f"고점: {peak:,.0f}원 ({_pct(peak, entry)} 대비 진입가)"
+                )
 
         else:
             # 홀딩 유지 — 현재 상태 상세 리포트
