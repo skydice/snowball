@@ -178,7 +178,8 @@ class KISApi:
         output2 = data.get("output2", {})
         if isinstance(output2, list):
             output2 = output2[0] if output2 else {}
-        cash = int(float(output2.get("dnca_tot_amt", 0)))
+        # dnca_tot_amt(예수금) + prvs_rcdl_excc_amt(가수도정산금액): 당일 매도 후 T+2 미결제분 포함
+        cash = int(float(output2.get("dnca_tot_amt", 0))) + int(float(output2.get("prvs_rcdl_excc_amt", 0)))
 
         return {"cash": cash, "holdings": holdings}
 
