@@ -16,7 +16,7 @@ PAPER_ACCOUNT_NO = os.environ["KIS_PAPER_STOCK"]
 ACCOUNT_SUFFIX = os.environ["KIS_PROD_TYPE"]  # "01"
 
 MA_PERIOD    = 60
-INVEST_RATIO = 0.25   # 단독 실행 시 fallback — run_all은 총 현금의 50%를 전략 수로 나눠 배분
+INVEST_RATIO = 0.50   # 단독 실행 시 fallback — run_all은 전략당 총 현금의 50% 배분
 
 STRATEGIES = {
     "it": {

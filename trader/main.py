@@ -326,8 +326,8 @@ def run_all(api: KISApi) -> None:
     try:
         total_cash = api.get_balance()["cash"]
         n_strategies = len(config.STRATEGIES)
-        per_strategy = int(total_cash * 0.50 / n_strategies)
-        log.info("총 예수금: %s원 → 전략당 투입 %s원 (각 25%%)", f"{total_cash:,}", f"{per_strategy:,}")
+        per_strategy = int(total_cash * 0.50)
+        log.info("총 예수금: %s원 → 전략당 투입 %s원 (각 50%%)", f"{total_cash:,}", f"{per_strategy:,}")
     except Exception as e:
         log.warning("잔고 선조회 실패, 개별 조회로 fallback: %s", e)
         per_strategy = None
