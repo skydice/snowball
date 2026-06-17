@@ -1,6 +1,10 @@
 from datetime import date, timedelta
 from typing import Optional, Tuple
 
+import logging
+
+log = logging.getLogger(__name__)
+
 
 def calc_ma60(ohlcv: list[dict], period: int = 60) -> Optional[float]:
     """최근 period일 종가 평균. 데이터 부족 시 None."""
@@ -51,7 +55,13 @@ def check_exit(
     peak  = state["peak_price"]
     half_sold = state["half_sold"]
 
-    if low <= entry * (1 + cfg["STOP_LOSS"]):
+    # 진입 당일은 low에 매수 전 오프닝 변동이 포함되므로 close로 체크
+    entry_today = state.get("entry_date", "") == date.today().isoformat()
+    sl_check = close if entry_today else low
+    if entry_today:
+        log.debug("손절 체크: 진입 당일 → close(%s) 기준", sl_check)
+
+    if sl_check <= entry * (1 + cfg["STOP_LOSS"]):
         return "STOP_LOSS", entry * (1 + cfg["STOP_LOSS"])
 
     if not half_sold and high >= entry * (1 + cfg["TAKE_PROFIT_HALF"]):
